@@ -1,11 +1,13 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
   Coins,
   FolderGit2,
   HandCoins,
   Rocket,
+  Search,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   createBounty,
@@ -17,7 +19,7 @@ import {
   reserveBounty,
   submitBounty,
 } from "./api";
-import { Bounty, CreateBountyPayload, OpenIssue } from "./types";
+import { Bounty, BountyStatus, CreateBountyPayload, OpenIssue } from "./types";
 import SkeletonBountyCard from "./SkeletonBountyCard";
 
 const initialForm: CreateBountyPayload = {
@@ -31,6 +33,131 @@ const initialForm: CreateBountyPayload = {
   deadlineDays: 14,
   labels: ["help wanted"],
 };
+
+const statusOptions: Array<{ value: "all" | BountyStatus; label: string }> = [
+  { value: "all", label: "All statuses" },
+  { value: "open", label: "Open" },
+  { value: "reserved", label: "Reserved" },
+  { value: "submitted", label: "Submitted" },
+  { value: "released", label: "Released" },
+  { value: "refunded", label: "Refunded" },
+  { value: "expired", label: "Expired" },
+];
+
+const statusOptionValues = new Set(statusOptions.map((option) => option.value));
+
+
+const statusGlossary: Array<{
+  status: BountyStatus;
+  label: string;
+  description: string;
+}> = [
+  {
+    status: "open",
+    label: "Open",
+    description: "Anyone can reserve this bounty and start working.",
+  },
+  {
+    status: "reserved",
+    label: "Reserved",
+    description: "One contributor has claimed it and is preparing a fix.",
+  },
+  {
+    status: "submitted",
+    label: "Submitted",
+    description: "Work is in review while the maintainer checks the submission.",
+  },
+  {
+    status: "released",
+    label: "Released",
+    description: "The submission was approved and the payout was sent.",
+  },
+  {
+    status: "refunded",
+    label: "Refunded",
+    description: "The bounty was canceled and the reward went back to the maintainer.",
+  },
+  {
+    status: "expired",
+    label: "Expired",
+    description: "The deadline passed before the work was completed.",
+  },
+];
+
+const statusCopy: Record<BountyStatus, { label: string; description: string }> = Object.fromEntries(
+  statusGlossary.map(({ status, label, description }) => [status, { label, description }]),
+) as Record<BountyStatus, { label: string; description: string }>;
+
+const actionCopy: Partial<Record<BountyStatus, Array<{ label: string; tone: string; tooltip: string }>>> = {
+  open: [
+    {
+      label: "Reserve",
+      tone: "secondary-button",
+      tooltip: "Claim this bounty so others know you are taking the first pass.",
+    },
+    {
+      label: "Refund",
+      tone: "ghost-button",
+      tooltip: "Cancel the bounty and return the reward to the maintainer.",
+    },
+  ],
+  reserved: [
+    {
+      label: "Submit PR",
+      tone: "secondary-button",
+      tooltip: "Share your pull request or demo link for maintainer review.",
+    },
+    {
+      label: "Refund",
+      tone: "ghost-button",
+      tooltip: "Return the reward if the reserved work will not move forward.",
+    },
+  ],
+  submitted: [
+    {
+      label: "Release payout",
+      tone: "primary-button",
+      tooltip: "Approve the submission and send the reward to the contributor.",
+    },
+  ],
+  expired: [
+    {
+      label: "Refund",
+      tone: "ghost-button",
+      tooltip: "Recover the locked reward after the deadline has passed.",
+    },
+  ],
+};
+
+function readInitialFilters(): {
+  searchQuery: string;
+  statusFilter: "all" | BountyStatus;
+  minReward: string;
+  maxReward: string;
+} {
+  if (typeof window === "undefined") {
+    return {
+      searchQuery: "",
+      statusFilter: "all",
+      minReward: "",
+      maxReward: "",
+    };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const rawStatus = params.get("status");
+  const statusFilter =
+    rawStatus && statusOptionValues.has(rawStatus as "all" | BountyStatus)
+      ? (rawStatus as "all" | BountyStatus)
+      : "all";
+
+  return {
+    searchQuery: params.get("search") ?? "",
+    statusFilter,
+    minReward: params.get("minReward") ?? "",
+    maxReward: params.get("maxReward") ?? "",
+  };
+}
 
 function formatRelativeDeadline(deadlineAt: number): string {
   const now = Math.floor(Date.now() / 1000);
@@ -47,6 +174,7 @@ function shortAddress(value: string): string {
 }
 
 function App() {
+  const initialFilters = useMemo(() => readInitialFilters(), []);
   const [form, setForm] = useState<CreateBountyPayload>(initialForm);
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [issues, setIssues] = useState<OpenIssue[]>([]);
@@ -54,6 +182,10 @@ function App() {
   const [submitting, setSubmitting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState(initialFilters.searchQuery);
+  const [statusFilter, setStatusFilter] = useState<"all" | BountyStatus>(initialFilters.statusFilter);
+  const [minReward, setMinReward] = useState(initialFilters.minReward);
+  const [maxReward, setMaxReward] = useState(initialFilters.maxReward);
 
   async function refresh(): Promise<void> {
     const [bountyData, issueData] = await Promise.all([listBounties(), listOpenIssues()]);
@@ -89,6 +221,43 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams();
+
+    if (searchQuery.trim() !== "") {
+      params.set("search", searchQuery);
+    }
+
+    if (statusFilter !== "all") {
+      params.set("status", statusFilter);
+    }
+
+    if (minReward !== "") {
+      params.set("minReward", minReward);
+    }
+
+    if (maxReward !== "") {
+      params.set("maxReward", maxReward);
+    }
+
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+  }, [maxReward, minReward, searchQuery, statusFilter]);
+
+  useEffect(() => {
+    function handlePopState() {
+      const filters = readInitialFilters();
+      setSearchQuery(filters.searchQuery);
+      setStatusFilter(filters.statusFilter);
+      setMinReward(filters.minReward);
+      setMaxReward(filters.maxReward);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   const metrics = useMemo(() => {
     const activePool = bounties.filter((bounty) =>
       ["open", "reserved", "submitted"].includes(bounty.status),
@@ -100,6 +269,64 @@ function App() {
       shippedRewards: bounties.filter((bounty) => bounty.status === "released").length,
     };
   }, [bounties]);
+
+  const rewardBounds = useMemo(() => {
+    if (bounties.length === 0) {
+      return { lowest: 0, highest: 0 };
+    }
+
+    return {
+      lowest: Math.min(...bounties.map((bounty) => bounty.amount)),
+      highest: Math.max(...bounties.map((bounty) => bounty.amount)),
+    };
+  }, [bounties]);
+
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const parsedMinReward = minReward === "" ? null : Number(minReward);
+  const parsedMaxReward = maxReward === "" ? null : Number(maxReward);
+
+  const effectiveMinReward =
+    parsedMinReward !== null && Number.isFinite(parsedMinReward) ? parsedMinReward : null;
+  const effectiveMaxReward =
+    parsedMaxReward !== null && Number.isFinite(parsedMaxReward) ? parsedMaxReward : null;
+
+  const filteredBounties = useMemo(() => {
+    return bounties.filter((bounty) => {
+      const matchesSearch =
+        normalizedSearch.length === 0 ||
+        [
+          bounty.title,
+          bounty.summary,
+          bounty.repo,
+          bounty.status,
+          bounty.issueNumber.toString(),
+          bounty.tokenSymbol,
+          ...bounty.labels,
+        ].some((value) => value.toLowerCase().includes(normalizedSearch));
+
+      const matchesStatus = statusFilter === "all" || bounty.status === statusFilter;
+      const matchesMinReward = effectiveMinReward === null || bounty.amount >= effectiveMinReward;
+      const matchesMaxReward = effectiveMaxReward === null || bounty.amount <= effectiveMaxReward;
+
+      return matchesSearch && matchesStatus && matchesMinReward && matchesMaxReward;
+    });
+  }, [
+    bounties,
+    effectiveMaxReward,
+    effectiveMinReward,
+    normalizedSearch,
+    statusFilter,
+  ]);
+
+  const activeRewardLabel = useMemo(() => {
+    if (effectiveMinReward === null && effectiveMaxReward === null) {
+      return `Any reward (${rewardBounds.lowest}–${rewardBounds.highest} XLM available)`;
+    }
+
+    const lower = effectiveMinReward ?? rewardBounds.lowest;
+    const upper = effectiveMaxReward ?? rewardBounds.highest;
+    return `${lower}–${upper} XLM`;
+  }, [effectiveMaxReward, effectiveMinReward, rewardBounds.highest, rewardBounds.lowest]);
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -174,21 +401,7 @@ function App() {
     }
   }
 
-  async function handleExportReleasedPayouts() {
-    try {
-      setExporting(true);
-      setError(null);
-      const { blob, filename } = await exportReleasedPayoutsCsv();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to export released payouts.");
-    } finally {
-      setExporting(false);
+
     }
   }
 
@@ -388,20 +601,119 @@ function App() {
             <HandCoins size={18} />
           </div>
 
+          <div className="board-filters">
+            <div className="board-filters__header">
+              <div>
+                <span className="panel-kicker">Board filters</span>
+                <p>
+                  Showing <strong>{filteredBounties.length}</strong> of <strong>{bounties.length}</strong>{" "}
+                  bounties
+                </p>
+              </div>
+              <button className="ghost-button filter-reset" type="button" onClick={clearFilters}>
+                Clear filters
+              </button>
+            </div>
+
+            <div className="filter-grid">
+              <label className="filter-field filter-field--search">
+                <span>Search</span>
+                <div className="input-with-icon">
+                  <Search size={16} />
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search repo, title, labels, status"
+                  />
+                </div>
+              </label>
+
+              <label className="filter-field">
+                <span>Status</span>
+                <div className="input-with-icon">
+                  <SlidersHorizontal size={16} />
+                  <select
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value as "all" | BountyStatus)}
+                  >
+                    {statusOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </label>
+
+              <label className="filter-field">
+                <span>Min reward</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  value={minReward}
+                  onChange={(event) => setMinReward(event.target.value)}
+                  placeholder={rewardBounds.lowest > 0 ? `${rewardBounds.lowest}` : "0"}
+                />
+              </label>
+
+              <label className="filter-field">
+                <span>Max reward</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  value={maxReward}
+                  onChange={(event) => setMaxReward(event.target.value)}
+                  placeholder={rewardBounds.highest > 0 ? `${rewardBounds.highest}` : "No limit"}
+                />
+              </label>
+            </div>
+
+            <div className="active-range" aria-live="polite">
+              <span className="active-range__label">Active reward range</span>
+              <strong>{activeRewardLabel}</strong>
+            </div>
+          </div>
+
+          <section className="status-glossary" aria-labelledby="status-glossary-title">
+            <div className="status-glossary__header">
+              <div>
+                <span className="panel-kicker">Contributor guide</span>
+                <h3 id="status-glossary-title">Status quick guide</h3>
+              </div>
+              <span className="status-glossary__hint">Hover or tap pills and buttons for a short explanation.</span>
+            </div>
+            <div className="status-glossary__list">
+              {statusGlossary.map((item) => (
+                <article className="status-glossary__item" key={item.status}>
+                  <span className={`status-pill status-pill--${item.status}`}>{item.label}</span>
+                  <p>{item.description}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
           {loading ? (
             <div className="board-list">
               {Array.from({ length: 3 }).map((_, i) => (
                 <SkeletonBountyCard key={i} />
               ))}
             </div>
-          ) : (
+          ) : filteredBounties.length > 0 ? (
             <div className="board-list">
-              {bounties.map((bounty) => (
+              {filteredBounties.map((bounty) => (
                 <article className="bounty-card" key={bounty.id}>
                   <div className="bounty-card__top">
                     <div>
-                      <span className={`status-pill status-pill--${bounty.status}`}>
-                        {bounty.status}
+                      <span
+                        className={`status-pill status-pill--${bounty.status}`}
+                        title={statusCopy[bounty.status].description}
+                        aria-label={`${statusCopy[bounty.status].label}: ${statusCopy[bounty.status].description}`}
+                      >
+                        {statusCopy[bounty.status].label}
                       </span>
                       <h3>{bounty.title}</h3>
                     </div>
@@ -441,6 +753,10 @@ function App() {
                     ))}
                   </div>
 
+                  <p className="status-helper">
+                    <strong>{statusCopy[bounty.status].label}:</strong> {statusCopy[bounty.status].description}
+                  </p>
+
                   {bounty.submissionUrl && (
                     <a className="submission-link" href={bounty.submissionUrl} target="_blank" rel="noreferrer">
                       Review submission <ArrowUpRight size={16} />
@@ -448,29 +764,14 @@ function App() {
                   )}
 
                   <div className="action-row">
-                    {bounty.status === "open" && (
-                      <button className="secondary-button" onClick={() => void handleReserve(bounty)}>
-                        Reserve
-                      </button>
-                    )}
-                    {bounty.status === "reserved" && (
-                      <button className="secondary-button" onClick={() => void handleSubmit(bounty)}>
-                        Submit PR
-                      </button>
-                    )}
-                    {bounty.status === "submitted" && (
-                      <button className="primary-button" onClick={() => void handleRelease(bounty)}>
-                        Release payout
-                      </button>
-                    )}
-                    {["open", "reserved", "expired"].includes(bounty.status) && (
-                      <button className="ghost-button" onClick={() => void handleRefund(bounty)}>
-                        Refund
-                      </button>
-                    )}
+                    {(actionCopy[bounty.status] ?? []).map((action) => renderActionButton(bounty, action))}
                   </div>
                 </article>
               ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              No bounties match the current search, status, and reward range filters.
             </div>
           )}
         </section>
@@ -510,4 +811,3 @@ function App() {
 }
 
 export default App;
-
